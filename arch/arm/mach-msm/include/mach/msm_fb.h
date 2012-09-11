@@ -372,5 +372,5 @@ extern struct completion mdp_hist_comp;
 
 #endif
 #endif
-extern int check_psensor;
+
 #endif

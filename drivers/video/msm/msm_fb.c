@@ -83,7 +83,6 @@ struct mdp_device *mdp;
 #ifdef CONFIG_FB_MSM_OVERLAY
 static atomic_t mdpclk_on = ATOMIC_INIT(1);
 #endif
-DECLARE_MUTEX(ov_semaphore);
 
 struct msmfb_info {
 	struct fb_info *fb;
@@ -116,15 +115,13 @@ struct msmfb_info {
 	wait_queue_head_t frame_wq;
 	struct workqueue_struct *resume_workqueue;
 	struct work_struct resume_work;
-	struct delayed_work msmfb_resume_work;
+	struct work_struct msmfb_resume_work;
 	struct msmfb_callback dma_callback;
 	struct msmfb_callback vsync_callback;
 	struct hrtimer fake_vsync;
 	ktime_t vsync_request_time;
 	unsigned fb_resumed;
 	unsigned overrides;
-	int sensor_check;
-	int suspend_jiffies;
 };
 
 #if (defined(CONFIG_USB_FUNCTION_PROJECTOR) || defined(CONFIG_USB_ANDROID_PROJECTOR))
@@ -172,37 +169,6 @@ static int msmfb_release(struct fb_info *info, int user)
 	return 0;
 }
 
-int overlay_semaphore_lock(void)
-{
-	static struct task_struct last_owner_task = {0};
-	static int fail_counter = 0;
-	int err = down_timeout(&ov_semaphore, msecs_to_jiffies(1000));
-
-	if( err==0 ){
-		// Got the ownership for this semaphore, record who own it...
-		last_owner_task.pid = current->pid;
-		last_owner_task.tgid = current->tgid;
-		strncpy( last_owner_task.comm, current->comm, (TASK_COMM_LEN-1) );
-		// Reset the fail counter...
-		fail_counter = 0;
-	}else{
-		// Fail to get the ownership for this semaphore...
-		if( (fail_counter%10)==0 ){
-			// Show out the debug message every 10 times fail...
-			PR_DISP_WARN("Semaphore own by [%s](%d, %d), [%s](%d, %d) want to own it(err=%d)...\n", last_owner_task.comm, last_owner_task.pid, last_owner_task.tgid, current->comm, current->pid, current->tgid, err);
-			dump_stack();
-		}
-		fail_counter++;
-	}
-
-	return err;
-}
-
-void overlay_semaphore_unlock(void)
-{
-	up(&ov_semaphore);
-}
-
 /* Called from dma interrupt handler, must not sleep */
 static void msmfb_handle_dma_interrupt(struct msmfb_callback *callback)
 {
@@ -215,7 +181,6 @@ static void msmfb_handle_dma_interrupt(struct msmfb_callback *callback)
 	static int64_t frame_count;
 	static ktime_t last_sec;
 #endif
-	overlay_semaphore_unlock();
 
 	spin_lock_irqsave(&msmfb->update_lock, irq_flags);
 	msmfb->frame_done = msmfb->frame_requested;
@@ -260,13 +225,11 @@ static int msmfb_start_dma(struct msmfb_info *msmfb)
 	}
 	if (msmfb->frame_done == msmfb->frame_requested) {
 		spin_unlock_irqrestore(&msmfb->update_lock, irq_flags);
-		overlay_semaphore_unlock();
 		return -1;
 	}
 	if (msmfb->sleeping == SLEEPING) {
 		DLOG(SUSPEND_RESUME, "tried to start dma while asleep\n");
 		spin_unlock_irqrestore(&msmfb->update_lock, irq_flags);
-		overlay_semaphore_unlock();
 		return -1;
 	}
 	x = msmfb->update_info.left;
@@ -298,7 +261,6 @@ error:
 	/* some clients need to clear their vsync interrupt */
 	if (panel->clear_vsync)
 		panel->clear_vsync(panel);
-	overlay_semaphore_unlock();
 	wake_up(&msmfb->frame_wq);
 	return 0;
 }
@@ -460,7 +422,6 @@ restart:
 
 	/* if the panel is all the way on wait for vsync, otherwise sleep
 	 * for 16 ms (long enough for the dma to panel) and then begin dma */
-	overlay_semaphore_lock();
 	msmfb->vsync_request_time = ktime_get();
 	if (panel->request_vsync && (sleeping == AWAKE)) {
 		wake_lock_timeout(&msmfb->idle_lock, HZ/4);
@@ -563,27 +524,11 @@ static void msmfb_suspend(struct early_suspend *h)
 	struct msmfb_info *msmfb = container_of(h, struct msmfb_info,
 						early_suspend);
 	struct msm_panel_data *panel = msmfb->panel;
-	int ret = 0;
 	/* suspend the panel */
-	PR_DISP_INFO("%s", __func__);
 #ifdef CONFIG_FB_MSM_OVERLAY
 	atomic_set(&mdpclk_on, 0);
 #endif
-	msmfb->suspend_jiffies = jiffies;
-
-	if (check_psensor != 1) {
-		msmfb->sensor_check = 0;
-		PR_DISP_INFO("%s, FAR!\n", __func__);
-	} else {
-		msmfb->sensor_check = 1;
-		PR_DISP_INFO("%s, NEAR!\n", __func__);
-	}
-
-	ret = cancel_delayed_work_sync(&msmfb->msmfb_resume_work);
-	if (ret <= 0)/* ret:0 meanns nothing to cancel. ret:1 means cancel success. ret -1:means cancel fail*/
-		panel->suspend(panel);
-	else
-		PR_DISP_INFO("%s skip suspend, ret=%d\n", __func__, ret);
+	panel->suspend(panel);
 	msmfb->fb_resumed = 0;
 	mutex_unlock(&msmfb->panel_init_lock);
 }
@@ -592,27 +537,13 @@ static void msmfb_resume_handler(struct early_suspend *h)
 {
 	struct msmfb_info *msmfb = container_of(h, struct msmfb_info,
 					early_suspend);
-	int delay_time = 0;
-	int time_diff = 0;
-
 #ifdef CONFIG_HTC_ONMODE_CHARGING
 	if (msmfb->fb_resumed == 1) {
 		DLOG(SUSPEND_RESUME, "fb is resumed by onchg. skip resume\n");
 		return;
 	}
 #endif
-	PR_DISP_INFO("%s\n", __func__);
-
-	time_diff = (jiffies - msmfb->suspend_jiffies) * 1000 / HZ;
-
-	if (msmfb->sensor_check == 1) {
-		if (time_diff < 1500) {
-			delay_time = 1500 - time_diff;
-			PR_DISP_INFO("resume delay_time:%d\n", delay_time);
-		}
-	}
-
-	queue_delayed_work(msmfb->resume_workqueue, &msmfb->msmfb_resume_work, msecs_to_jiffies(delay_time));
+	queue_work(msmfb->resume_workqueue, &msmfb->msmfb_resume_work);
 	wait_event_interruptible_timeout(msmfb->frame_wq, msmfb->fb_resumed==1,HZ/2);
 }
 
@@ -659,7 +590,7 @@ static void msmfb_onchg_resume_handler(struct early_suspend *h)
 {
 	struct msmfb_info *msmfb = container_of(h, struct msmfb_info,
 					onchg_suspend);
-	queue_delayed_work(msmfb->resume_workqueue, &msmfb->msmfb_resume_work, 0);
+	queue_work(msmfb->resume_workqueue, &msmfb->msmfb_resume_work);
 	wait_event_interruptible_timeout(msmfb->frame_wq, msmfb->fb_resumed == 1, HZ/2);
 }
 #endif
@@ -667,7 +598,7 @@ static void msmfb_onchg_resume_handler(struct early_suspend *h)
 static void msmfb_resume(struct work_struct *work)
 {
 	struct msmfb_info *msmfb =
-		container_of(work, struct msmfb_info, msmfb_resume_work.work);
+		container_of(work, struct msmfb_info, msmfb_resume_work);
 	struct msm_panel_data *panel = msmfb->panel;
 	unsigned long irq_flags=0;
 
@@ -1330,7 +1261,7 @@ static int msmfb_probe(struct platform_device *pdev)
 	wake_lock_init(&msmfb->idle_lock, WAKE_LOCK_IDLE, "msmfb_idle_lock");
 
 #ifdef CONFIG_HAS_EARLYSUSPEND
-	INIT_DELAYED_WORK(&msmfb->msmfb_resume_work, msmfb_resume);
+	INIT_WORK(&msmfb->msmfb_resume_work, msmfb_resume);
 
 	if (!(msmfb->overrides & MSM_FB_PM_DISABLE)) {
 		msmfb->early_suspend.suspend = msmfb_suspend;
@@ -1388,10 +1319,6 @@ static int msmfb_probe(struct platform_device *pdev)
 				 fb->var.yres, 0, 1);
 	}
 #endif
-	/* HTC, Add for no backlight issue on phone call */
-	msmfb->sensor_check = 0;
-	msmfb->suspend_jiffies = 0;
-
 	/* Jay, 29/12/08' */
 	display_notifier(display_notifier_callback, NOTIFY_MSM_FB);
 

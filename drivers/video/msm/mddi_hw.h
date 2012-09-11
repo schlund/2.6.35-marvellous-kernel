@@ -317,7 +317,4 @@ struct __attribute__((packed)) mddi_llentry {
 	} u;
 };
 
-extern int overlay_semaphore_lock(void);
-extern void overlay_semaphore_unlock(void);
-
 #endif
