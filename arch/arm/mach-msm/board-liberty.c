@@ -29,7 +29,6 @@
 #include <linux/capella_cm3602.h>
 #include <linux/sysdev.h>
 #include <linux/android_pmem.h>
-#include <linux/curcial_oj.h>
 #include <linux/mmc/sdio_ids.h>
 #include <linux/gpio_event.h>
 #include <linux/mtd/nand.h>
@@ -163,11 +162,6 @@ static struct microp_function_config microp_functions[] = {
 		.category = MICROP_FUNCTION_RESET_INT,
 		.int_pin = 1 << 8,
 	},
-	{
-		.name   = "oj",
-		.category = MICROP_FUNCTION_OJ,
-		.int_pin = 1 << 12,
-	},
 };
 
 static struct microp_function_config microp_lightsensor = {
@@ -247,7 +241,7 @@ static struct microp_i2c_platform_data microp_data = {
 	.num_devices = ARRAY_SIZE(microp_devices),
 	.microp_devices = microp_devices,
 	.gpio_reset = LIBERTY_GPIO_UP_RESET_N,
-	.spi_devices = SPI_OJ | SPI_GSENSOR,
+	.spi_devices = SPI_GSENSOR,
 };
 
 static struct synaptics_i2c_rmi_platform_data liberty_ts_t1007_data[] = {
@@ -697,91 +691,6 @@ static struct platform_device capella_cm3602 = {
 };
 /* End Proximity Sensor (Capella_CM3602)*/
 
-static void curcial_oj_shutdown (int	enable)
-{
-	uint8_t cmd[3];
-	memset(cmd, 0, sizeof(uint8_t)*3);
-
-	cmd[2] = 0x80;
-	if (enable)
-		microp_i2c_write(0x91, cmd, 3);
-	else
-		microp_i2c_write(0x90, cmd, 3);
-}
-static int curcial_oj_poweron(int on)
-{
-	struct vreg	*oj_power = vreg_get(0, "rftx");
-	if (IS_ERR(oj_power)) {
-		printk(KERN_ERR"%s:Error power domain\n",__func__);
-		return 0;
-	}
-
-	if (on) {
-		vreg_set_level(oj_power, 2850);
-		vreg_enable(oj_power);
-		printk(KERN_ERR "%s:OJ	power	enable(%d)\n", __func__, on);
-	} else {
-		vreg_disable(oj_power);
-		printk(KERN_ERR "%s:OJ	power	enable(%d)\n", __func__, on);
-		}
-	return 1;
-}
-#define LIB_MICROP_VER	0x02
-static void curcial_oj_adjust_xy(uint8_t *data, int16_t *mSumDeltaX, int16_t *mSumDeltaY)
-{
-	int8_t 	deltaX;
-	int8_t 	deltaY;
-
-
-	if (data[2] == 0x80)
-		data[2] = 0x81;
-	if (data[1] == 0x80)
-		data[1] = 0x81;
-	if (0) {
-		deltaX = (1)*((int8_t) data[2]); /*X=2*/
-		deltaY = (1)*((int8_t) data[1]); /*Y=1*/
-	} else {
-		deltaX = (1)*((int8_t) data[1]);
-		deltaY = (1)*((int8_t) data[2]);
-	}
-	*mSumDeltaX += -((int16_t)deltaX);
-	*mSumDeltaY += -((int16_t)deltaY);
-}
-static struct curcial_oj_platform_data liberty_oj_data = {
-	.oj_poweron = curcial_oj_poweron,
-	.oj_shutdown = curcial_oj_shutdown,
-	.oj_adjust_xy = curcial_oj_adjust_xy,
-	.microp_version = LIB_MICROP_VER,
-	.mdelay_time = 0,
-	.normal_th = 8,
-	.xy_ratio = 15,
-	.interval = 20,
-	.swap = true,
-	.x = 1,
-	.y = 1,
-	.share_power = false,
-	.debugflag = 0,
-	.ap_code = true,
-	.sht_tbl = {0, 2000, 2250, 2500, 2750, 3000},
-	.pxsum_tbl = {0, 0, 40, 50, 60, 70},
-	.degree = 6,
-	.Xsteps = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
-		10, 10, 10, 10, 10, 9, 9, 9, 9, 9,
-		9, 9, 9, 9, 9, 9, 9, 9, 9, 9},
-	.Ysteps = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
-		10, 10, 10, 10, 10, 9, 9, 9, 9, 9,
-		9, 9, 9, 9, 9, 9, 9, 9, 9, 9},
-	.irq = MSM_uP_TO_INT(12),
-};
-
-static struct platform_device liberty_oj = {
-	.name = CURCIAL_OJ_NAME,
-	.id = -1,
-	.dev = {
-		.platform_data	= &liberty_oj_data,
-	}
-};
-
 static struct msm_i2c_device_platform_data msm_i2c_pdata = {
 	.i2c_clock = 400000,
 	.clock_strength = GPIO_8MA,
@@ -823,7 +732,6 @@ static struct platform_device *devices[] __initdata = {
 #ifdef CONFIG_HTC_PWRSINK
 	&liberty_pwr_sink,
 #endif
-	&liberty_oj,
 	&capella_cm3602,
 	&liberty_timed_gpios,
 };

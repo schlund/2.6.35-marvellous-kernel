@@ -55,7 +55,7 @@ static const unsigned short liberty_keymap[ARRAY_SIZE(liberty_col_gpios) *
 
 	[KEYMAP_INDEX(2, 0)] = KEY_RESERVED,
 	[KEYMAP_INDEX(2, 1)] = KEY_RESERVED,
-	[KEYMAP_INDEX(2, 2)] = BTN_MOUSE, /* OJ_ACTION */
+	[KEYMAP_INDEX(2, 2)] = KEY_RESERVED,
 };
 
 static void liberty_matrix_inputs_gpio(void)
@@ -75,7 +75,6 @@ static void liberty_matrix_inputs_gpio(void)
 
 static struct gpio_event_matrix_info liberty_keypad_matrix_info = {
 	.info.func = gpio_event_matrix_func,
-	.info.oj_btn = true,
 	.keymap = liberty_keymap,
 	.output_gpios = liberty_col_gpios,
 	.input_gpios = liberty_row_gpios,
@@ -159,7 +158,6 @@ static struct keyreset_platform_data liberty_reset_keys_pdata = {
 	.keys_down = {
 		KEY_POWER,
 		KEY_VOLUMEDOWN,
-		BTN_MOUSE,
 		0
 	},
 };
